@@ -30,6 +30,11 @@ class Config:
     # ---- 检索 ----
     top_k: int = 5
     min_score: float = 0.0                # 低于阈值的结果直接丢弃（可审计）
+    hybrid: bool = True                   # 混合检索：向量 + BM25 词法
+    hybrid_mode: str = "rrf"              # rrf（推荐）| weighted
+    bm25_weight: float = 0.5              # weighted 模式下的词法权重
+    mmr_lambda: float = 0.3               # MMR 去重强度，0=关闭
+    candidate_pool: int = 50              # 融合前的候选池大小
 
     # ---- 离线与网络 ----
     offline_only: bool = True             # 强制离线：禁止一切出网调用

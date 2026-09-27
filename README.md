@@ -59,6 +59,12 @@
 | 8 | **被遗忘权** | 删除文档常残留向量 | `forget` 一并删除文档元数据与全部 chunk 向量 |
 | 9 | **单文件、零外部服务** | 动辄需要 Postgres / Milvus / Redis 才能跑 | 单文件 SQLite，无服务进程，拷走即迁移 |
 | 10 | **零依赖可跑 + 工程可信度** | 多数是 demo 级实现，缺测试与长期维护 | 核心仅标准库；内置 `unittest` 测试覆盖索引 / 增量 / 权限 / 审计 / 删除；配置指纹写进审计，保证「同配置可复现」 |
+| 11 | **混合检索（向量 + BM25）** | 多数只做纯向量检索，对报错码 / 型号 / 专有名词这类低频精确词检索不到 | 向量 + BM25 词法双路召回，默认 RRF 融合（也支持加权），纯标准库实现 |
+| 12 | **MMR 结果去重** | top-k 常常返回一串近乎重复的相邻 chunk，浪费上下文 | 最大边际相关（MMR）在相关度与多样性间取平衡，`mmr_lambda` 可调 |
+| 13 | **业务标签过滤（tags）** | 只能全库检索，无法按部门 / 年份 / 业务线收窄 | 文档可带 `tags`，检索时按标签集合过滤（与 `acl` 权限正交） |
+| 14 | **章节感知切分 + HTML 解析** | 一律按固定字符窗口硬切，标题结构全丢；HTML 还要引第三方解析库 | Markdown 按标题层级切分并保留章节路径（引用可定位到章节）；HTML 用标准库 `HTMLParser` 解析，零依赖 |
+| 15 | **检索效果可量化评测** | 全靠手感调参，改了切分策略不知道变好还是变差 | 内置 `recall@k` 与 `MRR` 评测（`--json` 可进 CI），评测集为纯 JSON |
+| 16 | **运维可观测** | 只给一个「文档数」，不知道谁在问什么 | `docs` 列出已索引文档（含 acl/tags）；`audit-stats` 输出查询量、热点文档 Top10、权限分布、平均延迟；答案可导出带引用的 Markdown |
 
 ---
 
@@ -66,10 +72,14 @@
 
 ```bash
 # 核心零依赖，无需安装任何包（可选依赖见 requirements.txt）
-py -m localrag.cli index ./docs --acl team
+py -m localrag.cli index ./docs --acl team --tags 财务
 py -m localrag.cli query "报销需要提交什么材料？" --acl team
+py -m localrag.cli query "报销流程" --tags 财务 --md --out answer.md   # 导出带引用的 Markdown
+py -m localrag.cli docs                       # 列出已索引文档（含 acl / tags）
 py -m localrag.cli stats
-py -m localrag.cli audit-verify
+py -m localrag.cli audit-verify               # 校验审计链
+py -m localrag.cli audit-stats                # 查询量 / 热点文档 / 权限分布
+py -m localrag.cli eval --qrels qrels.json    # 检索效果评测 recall@k / MRR
 ```
 
 零依赖示例（会自建临时文档并演示完整链路）：
@@ -196,14 +206,18 @@ print(rag.ask("总结一下报销流程").text)
 LocalRAG/
 ├── localrag/
 │   ├── config.py       # 配置 + 离线开关 + 配置指纹
-│   ├── chunking.py     # 文档加载与切分（保留页码/字符区间）
+│   ├── chunking.py     # 文档加载与切分（HTML/Markdown 章节感知，保留页码/字符区间）
 │   ├── embeddings.py   # 确定性 hashing 嵌入 / 可选本地语义嵌入
-│   ├── store.py        # 单文件 SQLite（文档 + chunk + 向量 + ACL）
+│   ├── bm25.py         # BM25 词法检索 + RRF 融合（混合检索）
+│   ├── eval.py         # recall@k / MRR 评测
+│   ├── store.py        # 单文件 SQLite（文档 + chunk + 向量 + ACL + tags，带轻量迁移）
 │   ├── audit.py        # 哈希链审计日志（防篡改、可校验）
 │   ├── generator.py    # 抽取式生成 / 本地 OpenAI 兼容生成
-│   ├── rag.py          # 主流程：索引 → 检索 → 生成 → 审计
+│   ├── rag.py          # 主流程：索引 → 混合检索 → 生成 → 审计
 │   ├── cli.py          # 命令行
 │   └── server.py       # 可选 HTTP API（fastapi）
+├── scripts/            # 三平台运行脚本（setup / start，.sh + .bat）
+├── deploy/             # systemd / launchd / Windows 计划任务
 ├── tests/              # unittest 测试
 ├── examples/           # 零依赖示例
 ├── LICENSE             # AGPL-3.0
@@ -214,9 +228,12 @@ LocalRAG/
 
 ## 八、路线图
 
-- [ ] 混合检索（向量 + BM25）与重排
+- [x] 混合检索（向量 + BM25，RRF 融合）+ MMR 去重
+- [x] 业务标签（tags）过滤与 Markdown 章节感知切分
+- [x] 检索评测（recall@k / MRR）
+- [ ] 语义重排（cross-encoder，需本地模型）
 - [ ] 多模态：图片 / 表格抽取（仍保持离线）
-- [ ] 审计日志导出与可视化（按文档 / 用户维度）
+- [ ] 审计日志可视化（按文档 / 用户维度）
 - [ ] 更细粒度的权限（chunk 级 + 字段级）
 - [ ] 索引快照与迁移工具
 - [ ] 可选 Web UI（本地静态页，无外链资源）
@@ -260,6 +277,21 @@ chunk、分数、耗时与配置指纹。
 **Q9：可以商用吗？**
 可以自托管商用（AGPL-3.0，功能不阉割）。若你把它作为**云服务**对外提供，
 AGPL 要求同样开源相关改动。
+
+**Q10：混合检索怎么调 / 怎么关？**
+默认开启（向量 + BM25，RRF 融合）。只想用向量：`--retrieval vector`；
+想改成加权融合：`--hybrid-mode weighted`（配合 `bm25_weight`）；
+如果 top-k 里重复 chunk 太多，调大 `--mmr-lambda`（默认 0.3，0 表示关闭去重）。
+
+**Q11：怎么知道检索效果到底是变好还是变差？**
+写一个 qrels JSON（题目 → 相关文档片段），然后：
+
+```bash
+py -m localrag.cli eval --qrels qrels.json --top-k 5
+```
+
+会输出 `recall@5` 与 `MRR` 以及每题首次命中位置；加 `--json` 可放进 CI 做回归。
+调切分策略、开关混合检索时，用它来验证，而不是靠感觉。
 
 ## 十、支持本项目
 
