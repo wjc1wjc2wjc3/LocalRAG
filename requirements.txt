@@ -1,0 +1,7 @@
+# LocalRAG 核心：**零第三方依赖**，仅用 Python 标准库即可完成
+# 索引 → 检索 → 溯源 → 审计 全流程（pip install -r requirements.txt 不会装任何东西）。
+#
+# 以下都是**可选**扩展，按需安装：
+#   pip install sentence-transformers   # 语义嵌入（首次下载后走本地缓存，离线可用）
+#   pip install pypdf                   # 解析 PDF
+#   pip install fastapi uvicorn         # 启用 HTTP API（py -m localrag.cli serve）
