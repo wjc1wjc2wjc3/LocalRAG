@@ -64,6 +64,31 @@ py examples/quickstart.py
 py -m unittest discover -s tests -v
 ```
 
+### 一键脚本（Windows / Linux / macOS）
+
+| 系统 | 准备环境 | 运行 |
+|---|---|---|
+| Windows | `scripts\setup.bat` | `scripts\start.bat` |
+| Linux / macOS | `./scripts/setup.sh` | `./scripts/start.sh` |
+
+- `start` **不带参数**：跑示例 + 单元测试；**带参数**则透传给 CLI，
+  例如 `./scripts/start.sh index ./docs --acl team`、`scripts\start.bat query "问题"`。
+- 装可选依赖：`INSTALL_EXTRAS=1 ./scripts/setup.sh`
+  （Windows：`set INSTALL_EXTRAS=1` 后执行 `scripts\setup.bat`）。
+- 不想建虚拟环境：`NO_VENV=1`。
+- 核心零依赖，`setup` 只建虚拟环境、不装任何包也能直接跑。
+
+### 作为服务部署（HTTP API）
+
+| 系统 | 配置文件 | 用法 |
+|---|---|---|
+| Linux | `deploy/systemd/localrag-api.service` | 复制到 `/etc/systemd/system/`，按需改路径后 `sudo systemctl enable --now localrag-api` |
+| macOS | `deploy/launchd/com.localrag.api.plist` | 复制到 `/Library/LaunchDaemons/`，`sudo launchctl load -w /Library/LaunchDaemons/com.localrag.api.plist` |
+| Windows | `deploy/windows/install-service.ps1` | **管理员** PowerShell 执行，注册为开机自启计划任务（用系统自带功能，无需装额外软件）；`-Uninstall` 卸载 |
+
+> HTTP API 需要可选依赖 `fastapi` + `uvicorn`；CLI 用法（index / query / audit-verify）零依赖。
+> 注意：命令行里全局选项（`--db`、`--audit` 等）必须写在子命令 `serve` **之前**。
+
 ---
 
 ## 四、Python API

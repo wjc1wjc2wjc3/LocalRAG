@@ -1,0 +1,29 @@
+[Unit]
+Description=LocalRAG API - 全离线、可审计溯源的本地 RAG 服务
+Documentation=https://github.com/wjc1wjc2wjc3/LocalRAG
+After=network.target
+
+[Service]
+Type=simple
+User=localrag
+Group=localrag
+WorkingDirectory=/opt/LocalRAG
+
+# 数据目录与审计日志分离存放（审计日志建议放在只追加、受保护的目录）
+Environment="LOCALRAG_DB=/var/lib/localrag/kb.db"
+Environment="LOCALRAG_AUDIT=/var/log/localrag/audit.jsonl"
+
+# 注意：全局选项（--db / --audit）必须写在子命令 serve 之前
+ExecStart=/opt/LocalRAG/.venv/bin/python -m localrag.cli \
+  --db /var/lib/localrag/kb.db \
+  --audit /var/log/localrag/audit.jsonl \
+  serve --host 127.0.0.1 --port 8070
+
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

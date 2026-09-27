@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LocalRAG API（macOS launchd）
+  安装：sudo cp com.localrag.api.plist /Library/LaunchDaemons/
+        sudo launchctl load -w /Library/LaunchDaemons/com.localrag.api.plist
+  卸载：sudo launchctl unload -w /Library/LaunchDaemons/com.localrag.api.plist
+  日志：/var/log/localrag.log 与 /var/log/localrag.err
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.localrag.api</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/LocalRAG/.venv/bin/python</string>
+        <string>-m</string>
+        <string>localrag.cli</string>
+        <string>--db</string>
+        <string>/usr/local/var/localrag/kb.db</string>
+        <string>--audit</string>
+        <string>/usr/local/var/localrag/audit.jsonl</string>
+        <string>serve</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8070</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/LocalRAG</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/localrag.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/localrag.err</string>
+</dict>
+</plist>
