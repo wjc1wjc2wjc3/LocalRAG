@@ -368,5 +368,61 @@ class TestReasoningRerank(unittest.TestCase):
         self.assertEqual(out, [0, 2])
 
 
+class TestOnlineLLM(unittest.TestCase):
+    """在线/本地 LLM：base_url + api_key 鉴权，且由配置决定启用与否。"""
+
+    def test_default_is_extractive_offline(self):
+        rag = LocalRAG(Config(db_path=os.path.join(tempfile.mkdtemp(), "t.db")))
+        self.assertEqual(rag.generator.name, "extractive")
+
+    def test_online_llm_selected_from_config(self):
+        cfg = Config(llm_base_url="https://api.openai.com/v1",
+                     llm_api_key="sk-test", llm_model="gpt-4o-mini")
+        rag = LocalRAG(cfg)
+        self.assertEqual(rag.generator.name, "openai-compat")
+        self.assertEqual(rag.generator.api_key, "sk-test")
+        self.assertEqual(rag.generator.base_url, "https://api.openai.com/v1")
+
+    def test_api_key_sent_as_bearer(self):
+        import localrag.generator as G
+        captured = {}
+        def fake(req, timeout=None):
+            captured["req"] = req
+            return _FakeCM({"choices": [{"message": {"content": "答案 [1]"}}]})
+        with mock.patch.object(G.urllib.request, "urlopen", side_effect=fake):
+            g = G.OpenAICompatGenerator(base_url="https://api.openai.com/v1",
+                                        api_key="sk-secret", model="gpt")
+            out = g.generate("问题", [])
+        self.assertEqual(captured["req"].get_header("Authorization"), "Bearer sk-secret")
+        self.assertIn("答案", out)
+
+    def test_no_api_key_no_auth_header(self):
+        import localrag.generator as G
+        captured = {}
+        def fake(req, timeout=None):
+            captured["req"] = req
+            return _FakeCM({"choices": [{"message": {"content": "x"}}]})
+        with mock.patch.object(G.urllib.request, "urlopen", side_effect=fake):
+            G.OpenAICompatGenerator(base_url="http://127.0.0.1:8080/v1").generate("q", [])
+        self.assertIsNone(captured["req"].get_header("Authorization"))
+
+    def test_reasoner_sends_api_key(self):
+        import localrag.reason as R
+        captured = {}
+        def fake(req, timeout=None):
+            captured["req"] = req
+            return _FakeCM({"choices": [{"message": {"content": "[1]"}}]})
+        with mock.patch.object(R.urllib.request, "urlopen", side_effect=fake):
+            R.TreeReasoner(endpoint="https://x/v1", api_key="rk").select(
+                "q", [{"path": "a", "snippet": "s"}])
+        self.assertEqual(captured["req"].get_header("Authorization"), "Bearer rk")
+
+    def test_fingerprint_omits_secrets(self):
+        cfg = Config(llm_base_url="https://api.openai.com/v1", llm_api_key="sk-secret")
+        fp = cfg.fingerprint()
+        self.assertNotIn("sk-secret", fp)  # 指纹不含明文密钥
+        self.assertTrue(cfg.fingerprint)   # 且稳定可复现
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

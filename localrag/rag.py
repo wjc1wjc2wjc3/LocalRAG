@@ -21,7 +21,7 @@ from .chunking import (build_section_tree, chunk_document, file_hash, is_markdow
                        load_text, page_of, split_markdown_sections)
 from .config import Config
 from .embeddings import cosine, get_embedder, tokenize
-from .generator import ExtractiveGenerator
+from .generator import ExtractiveGenerator, OpenAICompatGenerator
 from .reason import TreeReasoner
 from .store import KnowledgeStore
 
@@ -115,7 +115,16 @@ class LocalRAG:
         self.store = store or KnowledgeStore(self.cfg.db_path)
         self.embedder = embedder or get_embedder(self.cfg)
         self.audit = audit or AuditLog(self.cfg.audit_path)
-        self.generator = generator or ExtractiveGenerator()
+        # 生成器选择：配置 llm_base_url 则启用在线/本地 LLM（OpenAI 兼容），
+        # 否则保持默认的抽取式（零 LLM、全离线）。二者都由用户决定。
+        if generator is not None:
+            self.generator = generator
+        elif self.cfg.llm_base_url:
+            self.generator = OpenAICompatGenerator(
+                base_url=self.cfg.llm_base_url, model=self.cfg.llm_model,
+                api_key=self.cfg.llm_api_key, timeout=self.cfg.llm_timeout)
+        else:
+            self.generator = ExtractiveGenerator()
         self._last_trace: dict = {}
 
     # ---------------- 索引 ----------------
@@ -348,7 +357,8 @@ class LocalRAG:
         use_reasoning = self.cfg.reasoning_rerank if reasoning is None else reasoning
         if use_reasoning:
             reasoner = TreeReasoner(self.cfg.reasoning_endpoint,
-                                    self.cfg.reasoning_model, enabled=True)
+                                    self.cfg.reasoning_model,
+                                    api_key=self.cfg.reasoning_api_key, enabled=True)
             cand = ordered[:max(1, self.cfg.reasoning_candidates)]
             if cand:
                 cand_objs = [{"path": p, "snippet": self._snippet_for_section(rows, score_by_idx, p)}

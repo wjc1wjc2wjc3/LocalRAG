@@ -54,16 +54,23 @@ class ExtractiveGenerator(BaseGenerator):
 
 
 class OpenAICompatGenerator(BaseGenerator):
-    """调用本地 OpenAI 兼容端点（默认指向 CPUEdgeInference）。"""
+    """调用任意 OpenAI 兼容端点：本地服务（如 CPUEdgeInference）或云端厂商均可。
+
+    - `base_url` 为空时由 `LocalRAG` 回退到 `ExtractiveGenerator`（零 LLM、全离线）；
+    - 云端厂商（OpenAI / 兼容服务）需传 `api_key`，将作为 `Authorization: Bearer` 发送；
+      本地模型通常留空即可。
+    全程用标准库 `urllib` 实现，不强制安装 `openai` SDK。
+    """
 
     name = "openai-compat"
 
     def __init__(self, base_url: str = "http://127.0.0.1:8080/v1",
-                 model: str = "auto", timeout: float = 60.0,
+                 model: str = "auto", timeout: float = 60.0, api_key: str = "",
                  system_prompt: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.api_key = api_key
         self.system_prompt = system_prompt or (
             "你是一个严谨的本地知识库助手。只能依据给定的【资料】回答，"
             "并在句末用 [n] 标注引用来源编号；资料中没有的内容必须明确说明不知道。"
@@ -85,10 +92,13 @@ class OpenAICompatGenerator(BaseGenerator):
             ],
             "temperature": 0.2,
         }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             self.base_url + "/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
@@ -97,6 +107,6 @@ class OpenAICompatGenerator(BaseGenerator):
             return data["choices"][0]["message"]["content"].strip()
         except (urllib.error.URLError, KeyError, json.JSONDecodeError) as exc:
             return (
-                f"[本地模型不可用：{exc}]\n"
+                f"[LLM 端点不可用：{exc}]\n"
                 "回退为抽取式答案：\n" + ExtractiveGenerator().generate(query, citations)
             )

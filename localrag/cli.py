@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="推理导航端点（默认 http://127.0.0.1:8080/v1）")
     p.add_argument("--history-turns", type=int, default=None,
                    help="上下文感知：并入查询的历史轮数（默认 2）")
+    p.add_argument("--llm-base-url", default=None,
+                   help="启用 LLM 生成：任意 OpenAI 兼容端点（本地如 http://127.0.0.1:8080/v1，"
+                        "或云端如 https://api.openai.com/v1）。留空=默认抽取式（全离线）")
+    p.add_argument("--llm-api-key", default=None,
+                   help="云端 LLM 厂商所需的 Key（本地模型可留空）")
+    p.add_argument("--llm-model", default="auto", help="LLM 模型名（默认 auto）")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -111,6 +117,12 @@ def main(argv=None) -> int:
         cfg.reasoning_endpoint = args.reasoning_endpoint
     if args.history_turns is not None:
         cfg.history_turns = args.history_turns
+    if args.llm_base_url:
+        cfg.llm_base_url = args.llm_base_url
+    if args.llm_api_key:
+        cfg.llm_api_key = args.llm_api_key
+    if args.llm_model:
+        cfg.llm_model = args.llm_model
     rag = LocalRAG(cfg)
 
     try:

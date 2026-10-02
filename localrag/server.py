@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from .config import Config
@@ -22,6 +23,14 @@ def create_app(cfg: Config | None = None):
         ) from exc
 
     cfg = cfg or Config()
+    # 允许通过环境变量注入在线/本地 LLM（不写明文进代码或配置）：
+    #   LOCALRAG_LLM_BASE_URL / LOCALRAG_LLM_API_KEY / LOCALRAG_LLM_MODEL
+    if os.environ.get("LOCALRAG_LLM_BASE_URL"):
+        cfg.llm_base_url = os.environ["LOCALRAG_LLM_BASE_URL"]
+    if os.environ.get("LOCALRAG_LLM_API_KEY"):
+        cfg.llm_api_key = os.environ["LOCALRAG_LLM_API_KEY"]
+    if os.environ.get("LOCALRAG_LLM_MODEL"):
+        cfg.llm_model = os.environ["LOCALRAG_LLM_MODEL"]
     from .rag import LocalRAG
 
     rag = LocalRAG(cfg)

@@ -43,7 +43,16 @@ class Config:
     reasoning_rerank: bool = False        # LLM 推理式章节导航（需本地模型，可选外挂）
     reasoning_endpoint: str = "http://127.0.0.1:8080/v1"  # 本地 OpenAI 兼容端点
     reasoning_model: str = "auto"
+    reasoning_api_key: str = ""           # 云端推理端点所需的 Key（本地可留空）
     reasoning_candidates: int = 10        # 提交给 LLM 裁决的候选章节数
+
+    # ---- 生成器：离线 / 在线 LLM 由用户选择 ----
+    # llm_base_url 为空 = 默认抽取式（零 LLM、全离线）；
+    # 填入任意 OpenAI 兼容端点 = 启用 LLM 生成（本地服务或云端厂商均可）。
+    llm_base_url: str = ""                # 例如 http://127.0.0.1:8080/v1 或 https://api.openai.com/v1
+    llm_api_key: str = ""                 # 云端厂商（OpenAI / 兼容服务）所需；本地模型可留空
+    llm_model: str = "auto"
+    llm_timeout: float = 60.0
 
     # ---- 离线与网络 ----
     offline_only: bool = True             # 强制离线：禁止一切出网调用
@@ -64,10 +73,18 @@ class Config:
             os.environ["LOCALRAG_NO_NETWORK"] = "1"
 
     def fingerprint(self) -> str:
-        """配置指纹：写进审计日志，保证「同一个回答由哪套配置产生」可复现。"""
+        """配置指纹：写进审计日志，保证「同一个回答由哪套配置产生」可复现。
+
+        主动剔除密钥类字段，避免任何 secret 进入审计（仅保留其「是否启用」的布尔，
+        不泄漏明文）。
+        """
         d = asdict(self)
         d.pop("db_path")
         d.pop("audit_path")
+        for secret in ("llm_api_key", "reasoning_api_key"):
+            d.pop(secret, None)
+        d["llm_configured"] = bool(self.llm_base_url)
+        d["reasoning_configured"] = bool(self.reasoning_endpoint and self.reasoning_rerank)
         blob = json.dumps(d, sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()[:16]
 

@@ -23,10 +23,12 @@ class TreeReasoner:
     name = "tree-reasoner"
 
     def __init__(self, endpoint: str = "http://127.0.0.1:8080/v1",
-                 model: str = "auto", timeout: float = 30.0, enabled: bool = True):
+                 model: str = "auto", timeout: float = 30.0, api_key: str = "",
+                 enabled: bool = True):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.api_key = api_key
         self.enabled = enabled
 
     def select(self, query: str, candidates: list) -> list | None:
@@ -58,10 +60,13 @@ class TreeReasoner:
             ],
             "temperature": 0.0,
         }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             self.endpoint + "/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

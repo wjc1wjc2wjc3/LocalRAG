@@ -70,6 +70,8 @@
 | 19 | **推理式章节导航（可选 LLM）** | 纯相似度匹配，不会「像人翻书一样」定位章节 | 受 PageIndex 启发、做成**可选外挂**：开启且本地模型可达时，用 LLM 在候选章节上推理挑选相关子树；无模型/出错自动回退离线管线，系统始终可用 |
 | 20 | **可溯源检索路径（trace）** | 只给结果，无法解释「为什么是这样」 | 每个答案附带 `trace`：有效查询、是否上下文扩展、命中章节与得分、是否启用推理导航；配合既有哈希链审计，做到「结果 + 路径 + 审计」三重可解释 |
 
+| 21 | **离线 / 在线 LLM 任选** | 要么只能接云端（出网、泄密风险），要么只能本地（部署重）| `llm_base_url` 为空 = 默认抽取式（零 LLM、全离线）；填入任意 OpenAI 兼容端点即启用 LLM 生成，本地服务或云端厂商均可；`api_key` 以 `Bearer` 发送、不进审计、失败自动回退抽取式 |
+
 > **设计取舍（关于 PageIndex）**：PageIndex 是「LLM 中心、无向量」的标杆——用 LLM 建树、推理式检索。
 > LocalRAG 的底线是**零依赖、离线优先、默认不需要任何 LLM**。因此我们只借其**结构层、溯源 UX、上下文感知**思想，
 > 把「LLM 推理导航」做成**可选外挂**：没有本地模型时，向量 + BM25 + 结构感知的离线管线完整可用；有本地模型时再叠加推理式精排。
@@ -202,22 +204,42 @@ print(rag.audit_verify())             # (True, '审计链完整，共 N 条记�
 
 ---
 
-## 六、可选：接本地模型生成答案
+## 六、可选：接 LLM 生成答案（离线 / 在线，由你选）
 
-默认 `ExtractiveGenerator` **不需要任何 LLM**（抽取式作答 + 引用标注）。
-若想让本地小模型来组织语言，可配合同系列的 **CPUEdgeInference**（本地 CPU 推理服务），
-流量只在 `127.0.0.1` 内循环：
+默认 `ExtractiveGenerator` **不需要任何 LLM**（抽取式作答 + 引用标注），这是最稳的离线形态。
+当你想要更自然的语言组织时，可接入**任意 OpenAI 兼容端点**——**本地服务或云端厂商均可**，
+完全由配置决定，核心不离线：
 
 ```python
-from localrag.generator import OpenAICompatGenerator
 from localrag.rag import LocalRAG
 
-rag = LocalRAG(generator=OpenAICompatGenerator(
-    base_url="http://127.0.0.1:8080/v1", model="auto"))
+# 本地：流量只在 127.0.0.1 内循环（配合 CPUEdgeInference）
+rag = LocalRAG(llm_base_url="http://127.0.0.1:8080/v1", llm_model="auto")
+
+# 在线：云端厂商（如 OpenAI），填入 base_url 与 api_key 即可
+rag = LocalRAG(llm_base_url="https://api.openai.com/v1",
+               llm_api_key="sk-xxx", llm_model="gpt-4o-mini")
 print(rag.ask("总结一下报销流程").text)
 ```
 
-模型不可用时会自动回退到抽取式答案，不会抛错。
+- `llm_base_url` 为空 = 默认抽取式（零 LLM、全离线）；**填入即启用 LLM 生成**；
+- 云端厂商需要 `llm_api_key`，会作为 `Authorization: Bearer` 发送；本地模型通常留空；
+- 鉴权与请求用标准库 `urllib` 实现，**不强制安装 `openai` SDK**；
+- 端点不可用时自动回退到抽取式答案，不会抛错；
+- 密钥不会进入审计日志：`config_fingerprint` 已主动剔除 `api_key`/`reasoning_api_key` 明文，
+  仅保留「是否启用」的布尔，保证可复现且不泄漏 secret。
+
+### 命令行
+
+```bash
+# 本地模型
+py -m localrag.cli query "报销流程" --llm-base-url http://127.0.0.1:8080/v1
+# 在线云端
+py -m localrag.cli query "报销流程" --llm-base-url https://api.openai.com/v1 --llm-api-key sk-xxx --llm-model gpt-4o-mini
+```
+
+HTTP API 则通过环境变量启用（避免明文写配置）：
+`LOCALRAG_LLM_BASE_URL` / `LOCALRAG_LLM_API_KEY` / `LOCALRAG_LLM_MODEL`。
 
 ---
 
@@ -256,6 +278,7 @@ LocalRAG/
 - [x] **上下文感知检索**（`history` / `domain_terms` 并入查询）
 - [x] **可溯源检索路径（trace）**——答案附带命中章节与推理过程
 - [x] **推理式章节导航（可选 LLM 外挂）**——有本地模型时叠加，无模型自动回退
+- [x] **离线 / 在线 LLM 生成器任选**——`llm_base_url` 为空即默认抽取式（全离线），填入即启用本地或云端 OpenAI 兼容 LLM（`api_key` 鉴权、不进审计）
 - [ ] 语义重排（cross-encoder，需本地模型）
 - [ ] 多模态：图片 / 表格抽取（仍保持离线）
 - [ ] 审计日志可视化（按文档 / 用户维度）
