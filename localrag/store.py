@@ -99,6 +99,17 @@ class KnowledgeStore:
         row = cur.fetchone()
         return dict(row) if row else None
 
+    def get_tree(self, doc_id: str):
+        """读取该文档的章节树（构建于 meta.tree，离线、零额外表）。"""
+        doc = self.get_document(doc_id)
+        if not doc:
+            return None
+        try:
+            meta = json.loads(doc.get("meta") or "{}")
+        except json.JSONDecodeError:
+            return None
+        return meta.get("tree") or None
+
     def stored_hash(self, doc_id: str) -> str | None:
         row = self.get_document(doc_id)
         return row["source_hash"] if row else None

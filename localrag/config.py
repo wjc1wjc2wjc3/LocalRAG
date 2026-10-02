@@ -36,6 +36,15 @@ class Config:
     mmr_lambda: float = 0.3               # MMR 去重强度，0=关闭
     candidate_pool: int = 50              # 融合前的候选池大小
 
+    # ---- 结构感知与推理检索（受 PageIndex 启发） ----
+    structure_aware: bool = True          # 按章节树聚合得分，优先返回高相关章节
+    structure_top_sections: int = 3       # 结构感知时保留的 top 章节数
+    history_turns: int = 2                # 上下文感知：并入查询的近期历史轮数
+    reasoning_rerank: bool = False        # LLM 推理式章节导航（需本地模型，可选外挂）
+    reasoning_endpoint: str = "http://127.0.0.1:8080/v1"  # 本地 OpenAI 兼容端点
+    reasoning_model: str = "auto"
+    reasoning_candidates: int = 10        # 提交给 LLM 裁决的候选章节数
+
     # ---- 离线与网络 ----
     offline_only: bool = True             # 强制离线：禁止一切出网调用
     allow_network: bool = False           # 仅在显式开启时才允许（如首次下载本地模型）

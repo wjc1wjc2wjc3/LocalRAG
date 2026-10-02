@@ -2,9 +2,11 @@
 
     py -m unittest discover -s tests -v
 """
+import json
 import os
 import tempfile
 import unittest
+import unittest.mock as mock
 
 from localrag.config import Config
 from localrag.eval import evaluate
@@ -239,6 +241,131 @@ class TestOpsAndEval(unittest.TestCase):
         md = ans.to_markdown()
         self.assertIn("## 引用", md)
         self.assertIn("a.txt", md)
+
+
+class _FakeCM:
+    """模拟 urllib 的上下文管理器返回，避免真实联网。"""
+    def __init__(self, payload):
+        self._p = payload
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def read(self):
+        return json.dumps(self._p).encode("utf-8")
+
+
+MD_GUIDE = ("# 总纲\n前言说明文字。\n\n"
+            "## 报销细则\n报销需提交发票与审批单，错误码 E1002 表示发票缺失。\n\n"
+            "## 假期政策\n年假十天需主管审批，错误码 E2007 表示审批超时。\n")
+
+
+class TestSectionTree(unittest.TestCase):
+    def test_hierarchy_built(self):
+        from localrag.chunking import build_section_tree, split_markdown_sections
+        secs = split_markdown_sections(MD_GUIDE)
+        tree = build_section_tree(secs)
+        self.assertEqual(len(tree), 1)
+        root = tree[0]
+        self.assertEqual(root["title"], "总纲")
+        self.assertEqual(len(root["children"]), 2)
+        self.assertIn("报销细则", [c["title"] for c in root["children"]])
+        self.assertIn("假期政策", [c["title"] for c in root["children"]])
+
+    def test_tree_stored_and_read_back(self):
+        tmp = tempfile.TemporaryDirectory()
+        cfg = Config(db_path=os.path.join(tmp.name, "t.db"),
+                     audit_path=os.path.join(tmp.name, "a.jsonl"),
+                     chunk_size=80, chunk_overlap=10, top_k=4)
+        rag = LocalRAG(cfg)
+        p = os.path.join(tmp.name, "guide.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(MD_GUIDE)
+        rag.index_document(p)
+        doc_id = rag.store.list_documents()[0]["doc_id"]
+        tree = rag.store.get_tree(doc_id)
+        self.assertIsNotNone(tree)
+        self.assertTrue(any(n["title"] == "报销细则" for n in tree[0]["children"]))
+        rag.close()
+        tmp.cleanup()
+
+
+class TestStructureAware(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = Config(db_path=os.path.join(self.tmp.name, "t.db"),
+                          audit_path=os.path.join(self.tmp.name, "a.jsonl"),
+                          chunk_size=80, chunk_overlap=10, top_k=4,
+                          structure_aware=True)
+        self.rag = LocalRAG(self.cfg)
+        self.md = os.path.join(self.tmp.name, "guide.md")
+        with open(self.md, "w", encoding="utf-8") as f:
+            f.write(MD_GUIDE)
+
+    def tearDown(self):
+        self.rag.close()
+        self.tmp.cleanup()
+
+    def test_structure_prunes_to_relevant_section(self):
+        self.rag.index_document(self.md)
+        ans = self.rag.ask("报销需要提交什么材料")
+        self.assertTrue(ans.trace.get("top_sections"))
+        paths = [s["path"] for s in ans.trace["top_sections"]]
+        self.assertTrue(any("报销细则" in p for p in paths))
+        self.assertTrue(ans.citations)
+        self.assertTrue(any("报销细则" in c.section for c in ans.citations))
+
+    def test_context_expansion_flag(self):
+        self.rag.index_document(self.md)
+        ans = self.rag.ask("发票缺失", domain_terms=["E1002"])
+        self.assertTrue(ans.trace["context_expanded"])
+
+    def test_history_folds_into_query(self):
+        self.rag.index_document(self.md)
+        ans = self.rag.ask("审批超时", history=[{"role": "user", "content": "年假怎么请"}])
+        self.assertTrue(ans.trace["context_expanded"])
+
+
+class TestReasoningRerank(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = Config(db_path=os.path.join(self.tmp.name, "t.db"),
+                          audit_path=os.path.join(self.tmp.name, "a.jsonl"),
+                          chunk_size=80, chunk_overlap=10, top_k=4,
+                          reasoning_rerank=True,
+                          reasoning_endpoint="http://127.0.0.1:9/v1")  # 不可达
+        self.rag = LocalRAG(self.cfg)
+        self.md = os.path.join(self.tmp.name, "guide.md")
+        with open(self.md, "w", encoding="utf-8") as f:
+            f.write(MD_GUIDE)
+
+    def tearDown(self):
+        self.rag.close()
+        self.tmp.cleanup()
+
+    def test_offline_fallback_returns_hits(self):
+        """推理端点不可达时，必须回退到离线管线并仍返回结果。"""
+        self.rag.index_document(self.md)
+        ans = self.rag.ask("报销需要提交什么材料")
+        self.assertTrue(ans.citations)
+        self.assertFalse(ans.trace["reasoning"]["used"])
+
+    def test_extract_json(self):
+        from localrag.reason import TreeReasoner
+        self.assertEqual(TreeReasoner._extract_json("```json\n[1,3]\n```"), "[1,3]")
+        self.assertEqual(TreeReasoner._extract_json("答案是 [2, 4] 吧"), "[2, 4]")
+
+    def test_select_parses_indices(self):
+        import localrag.reason as R
+        from localrag.reason import TreeReasoner
+        fake = {"choices": [{"message": {"content": "[1, 3]"}}]}
+        with mock.patch.object(R.urllib.request, "urlopen",
+                               return_value=_FakeCM(fake)):
+            r = TreeReasoner(enabled=True)
+            out = r.select("q", [{"path": "a", "snippet": "x"},
+                                 {"path": "b", "snippet": "y"},
+                                 {"path": "c", "snippet": "z"}])
+        self.assertEqual(out, [0, 2])
 
 
 if __name__ == "__main__":

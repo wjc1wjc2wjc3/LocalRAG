@@ -17,10 +17,12 @@ from dataclasses import dataclass, field
 
 from .audit import AuditLog
 from .bm25 import BM25, rrf_fuse
-from .chunking import chunk_document, file_hash, is_markdown, load_text, page_of
+from .chunking import (build_section_tree, chunk_document, file_hash, is_markdown,
+                       load_text, page_of, split_markdown_sections)
 from .config import Config
 from .embeddings import cosine, get_embedder, tokenize
 from .generator import ExtractiveGenerator
+from .reason import TreeReasoner
 from .store import KnowledgeStore
 
 
@@ -67,6 +69,7 @@ class Answer:
     latency_ms: float = 0.0
     audit_hash: str = ""
     config_fingerprint: str = ""
+    trace: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +79,7 @@ class Answer:
             "latency_ms": round(self.latency_ms, 2),
             "audit_hash": self.audit_hash,
             "config_fingerprint": self.config_fingerprint,
+            "trace": self.trace,
         }
 
     def to_markdown(self) -> str:
@@ -83,6 +87,19 @@ class Answer:
         lines = [f"## 问题\n\n{self.query}\n", "## 回答\n", self.text, "", "## 引用"]
         for i, c in enumerate(self.citations, start=1):
             lines.append(f"{i}. `{c.location()}`  score={c.score:.4f}  acl={c.acl}")
+        if self.trace:
+            lines += ["", "## 检索路径（可溯源）", ""]
+            lines.append(f"- 有效查询：{self.trace.get('query_effective', self.query)}")
+            if self.trace.get("context_expanded"):
+                lines.append("- 上下文扩展：是（已并入历史 / 领域词）")
+            if self.trace.get("top_sections"):
+                lines.append("- 命中章节：")
+                for s in self.trace["top_sections"]:
+                    lines.append(f"    - `[L{s['level']}]` {s['path']}  score={s['score']:.4f}")
+            r = self.trace.get("reasoning") or {}
+            if r.get("enabled"):
+                lines.append(f"- LLM 推理导航：{'已启用' if r.get('used') else '已启用但回退到离线管线'}"
+                             f"（端点 {r.get('endpoint')}）")
         return "\n".join(lines)
 
 
@@ -99,6 +116,7 @@ class LocalRAG:
         self.embedder = embedder or get_embedder(self.cfg)
         self.audit = audit or AuditLog(self.cfg.audit_path)
         self.generator = generator or ExtractiveGenerator()
+        self._last_trace: dict = {}
 
     # ---------------- 索引 ----------------
     def index_document(self, path: str, acl: str | None = None,
@@ -117,9 +135,9 @@ class LocalRAG:
             return {"path": path, "doc_id": doc_id, "status": "skipped", "chunks": 0}
 
         doc = load_text(path)
+        md = is_markdown(path)
         pieces = chunk_document(doc.text, self.cfg.chunk_size,
-                                self.cfg.chunk_overlap,
-                                markdown=is_markdown(path))
+                                self.cfg.chunk_overlap, markdown=md)
         if not pieces:
             return {"path": path, "doc_id": doc_id, "status": "empty", "chunks": 0}
 
@@ -141,11 +159,18 @@ class LocalRAG:
                 "vec": vec,
             })
 
+        # 章节树（受 PageIndex 启发）：从版面层级构建 doc→H1→H2 树，
+        # 供「结构感知 / 推理式」检索使用；非 Markdown 文档无树，自动降级。
+        tree = None
+        if md:
+            secs = split_markdown_sections(doc.text)
+            tree = build_section_tree(secs) if secs else None
+
         self.store.upsert_document(
             doc_id=doc_id, path=os.path.abspath(path), title=doc.title,
             source_hash=src_hash, acl=acl, tags=tags,
             meta={"embedder": self.embedder.name, "chunk_size": self.cfg.chunk_size,
-                  "markdown": is_markdown(path)},
+                  "markdown": md, "tree": tree},
         )
         n = self.store.replace_chunks(doc_id, rows)
         status = "updated" if stored else "indexed"
@@ -195,9 +220,75 @@ class LocalRAG:
             remaining.remove(best)
         return selected
 
+    def _iter_tree(self, nodes):
+        for n in nodes or []:
+            yield n
+            yield from self._iter_tree(n.get("children", []))
+
+    def _expand_query(self, query: str, history, domain_terms) -> str:
+        """上下文感知：把近期对话历史与领域词并入查询（离线、零依赖）。"""
+        parts = [query]
+        if history:
+            for turn in history[-max(0, self.cfg.history_turns):]:
+                if isinstance(turn, dict):
+                    parts.append(str(turn.get("content") or turn.get("query") or ""))
+                elif isinstance(turn, (list, tuple)):
+                    parts.extend(str(x) for x in turn)
+                else:
+                    parts.append(str(turn))
+        if domain_terms:
+            parts.append(" ".join(str(t) for t in domain_terms))
+        return " ".join(p for p in parts if p).strip()
+
+    def _aggregate_section_scores(self, rows, scores, trees):
+        """把 chunk 级得分沿章节树向上聚合，返回 (path->score, 降序章节列表)。"""
+        leaf: dict = {}
+        for i, r in enumerate(rows):
+            sec = r.get("section", "")
+            if sec:
+                leaf[sec] = max(leaf.get(sec, float("-inf")), scores[i])
+        section_scores = dict(leaf)
+        for tree in trees.values():
+            for node in self._iter_tree(tree):
+                s = leaf.get(node["path"], float("-inf"))
+                for ch in node.get("children", []):
+                    s = max(s, section_scores.get(ch["path"], float("-inf")))
+                section_scores[node["path"]] = s
+        ordered = [(n["path"], section_scores.get(n["path"], float("-inf")), n["level"])
+                   for tree in trees.values() for n in self._iter_tree(tree)
+                   if section_scores.get(n["path"], float("-inf")) > float("-inf")]
+        ordered.sort(key=lambda t: t[1], reverse=True)
+        return section_scores, ordered
+
+    @staticmethod
+    def _in_selected(section: str, selected_paths) -> bool:
+        if not section:
+            return True
+        for sp in selected_paths:
+            if section == sp or section.startswith(sp + " > "):
+                return True
+        return False
+
+    def _snippet_for_section(self, rows, scores, path: str) -> str:
+        best_i, best = None, None
+        for i, r in enumerate(rows):
+            if r.get("section", "") == path:
+                if best is None or scores[i] > best:
+                    best, best_i = scores[i], i
+        return rows[best_i]["text"][:200] if best_i is not None else ""
+
     def retrieve(self, query: str, acls: list | None = None,
-                 top_k: int | None = None, tags: list | None = None):
+                 top_k: int | None = None, tags: list | None = None,
+                 history: list | None = None, domain_terms: list | None = None,
+                 reasoning: bool | None = None):
         """检索：向量 + BM25 混合（RRF/加权），可选 MMR 去重。
+
+        在基础召回之上叠加（均离线、零依赖）：
+        - **上下文感知**：`history` / `domain_terms` 并入查询，构建更稳的向量/词法查询；
+        - **结构感知**（受 PageIndex 启发）：按章节树聚合得分，优先返回高相关章节，
+          保留文档自然层级而非碎成固定窗口；
+        - **推理式导航**（P1，可选外挂）：若开启且本地模型可达，用 LLM 在候选章节上
+          「推理」挑选相关子树；无模型/出错时自动回退离线管线。
 
         返回带溯源信息的 Citation 列表（按最终相关度降序）。
         """
@@ -206,7 +297,8 @@ class LocalRAG:
         if not rows:
             return []
 
-        qv = self.embedder.embed_one(query)
+        eff_query = self._expand_query(query, history, domain_terms)
+        qv = self.embedder.embed_one(eff_query)
         vec_scores = [cosine(qv, r["vec"]) for r in rows]
         pool_n = min(len(rows), max(self.cfg.candidate_pool, k * 4))
         order_vec = sorted(range(len(rows)), key=lambda i: vec_scores[i],
@@ -216,7 +308,7 @@ class LocalRAG:
             ranking = order_vec
             score_by_idx = {i: vec_scores[i] for i in order_vec}
         else:
-            lex = BM25().build([r["text"] for r in rows]).scores(query)
+            lex = BM25().build([r["text"] for r in rows]).scores(eff_query)
             order_lex = sorted(range(len(rows)), key=lambda i: lex[i],
                                reverse=True)[:pool_n]
             if self.cfg.hybrid_mode == "weighted":
@@ -242,11 +334,55 @@ class LocalRAG:
         # 低分过滤（混合时用融合分，纯向量时用余弦分）
         if self.cfg.min_score > 0:
             ranking = [i for i in ranking if score_by_idx.get(i, 0.0) >= self.cfg.min_score]
+
+        # ---- 结构感知 / 推理式导航：确定保留哪些章节 ----
+        trees = {}
+        for r in rows:
+            d = r["doc_id"]
+            if d not in trees:
+                trees[d] = self.store.get_tree(d) or []
+        _sec_scores, ordered = self._aggregate_section_scores(rows, score_by_idx, trees)
+
+        selected_paths = None
+        reasoning_used = False
+        use_reasoning = self.cfg.reasoning_rerank if reasoning is None else reasoning
+        if use_reasoning:
+            reasoner = TreeReasoner(self.cfg.reasoning_endpoint,
+                                    self.cfg.reasoning_model, enabled=True)
+            cand = ordered[:max(1, self.cfg.reasoning_candidates)]
+            if cand:
+                cand_objs = [{"path": p, "snippet": self._snippet_for_section(rows, score_by_idx, p)}
+                             for p, _, _ in cand]
+                picked = reasoner.select(query, cand_objs)
+                if picked:
+                    selected_paths = {cand[i][0] for i in picked}
+                    reasoning_used = True
+        if selected_paths is None and self.cfg.structure_aware and ordered:
+            top = ordered[:max(1, self.cfg.structure_top_sections)]
+            selected_paths = {p for p, _, _ in top}
+
+        if selected_paths is not None:
+            order_index = {p: i for i, p in enumerate(selected_paths)}
+
+            def _sort_key(i):
+                sec = rows[i].get("section", "")
+                if not sec:
+                    return (len(order_index), rows[i].get("start", 0))
+                for sp in selected_paths:
+                    if sec == sp or sec.startswith(sp + " > "):
+                        return (order_index[sp], rows[i].get("start", 0))
+                return (len(order_index), rows[i].get("start", 0))
+
+            filtered = [i for i in ranking if self._in_selected(rows[i].get("section", ""), selected_paths)]
+            if filtered:
+                filtered.sort(key=_sort_key)
+                ranking = filtered
+
         # 结果去重
         if self.cfg.mmr_lambda > 0 and len(ranking) > 1:
             ranking = self._mmr(ranking, score_by_idx, rows, k)
 
-        return [Citation(
+        hits = [Citation(
             chunk_id=rows[i]["chunk_id"], doc_id=rows[i]["doc_id"],
             score=score_by_idx.get(i, vec_scores[i]), text=rows[i]["text"],
             page=rows[i]["page"], start=rows[i]["start"], end=rows[i]["end"],
@@ -254,13 +390,31 @@ class LocalRAG:
             section=rows[i].get("section", ""), tags=rows[i].get("tags", []),
         ) for i in ranking[:k]]
 
+        self._last_trace = {
+            "query_effective": eff_query,
+            "context_expanded": bool(history or domain_terms),
+            "method": ("hybrid:" + self.cfg.hybrid_mode) if self.cfg.hybrid else "vector",
+            "candidate_pool": len(rows),
+            "structure_aware": bool(self.cfg.structure_aware and ordered),
+            "reasoning": {"enabled": bool(use_reasoning), "used": reasoning_used,
+                          "endpoint": self.cfg.reasoning_endpoint if use_reasoning else None},
+            "top_sections": [{"path": p, "score": round(s, 4), "level": lv}
+                             for p, s, lv in ordered[:self.cfg.structure_top_sections]],
+            "min_score": self.cfg.min_score,
+            "mmr": self.cfg.mmr_lambda > 0,
+        }
+        return hits
+
     # ---------------- 问答（含审计） ----------------
     def ask(self, query: str, acls: list | None = None, top_k: int | None = None,
-            tags: list | None = None) -> Answer:
+            tags: list | None = None, history: list | None = None,
+            domain_terms: list | None = None, reasoning: bool | None = None) -> Answer:
         t0 = time.time()
-        hits = self.retrieve(query, acls=acls, top_k=top_k, tags=tags)
+        hits = self.retrieve(query, acls=acls, top_k=top_k, tags=tags,
+                             history=history, domain_terms=domain_terms, reasoning=reasoning)
         text = self.generator.generate(query, hits)
         latency = (time.time() - t0) * 1000.0
+        trace = self._last_trace
 
         audit_hash = self.audit.append({
             "type": "query",
@@ -275,6 +429,8 @@ class LocalRAG:
             "generator": self.generator.name,
             "embedder": self.embedder.name,
             "retrieval": ("hybrid:" + self.cfg.hybrid_mode) if self.cfg.hybrid else "vector",
+            "context_expanded": bool(history or domain_terms),
+            "reasoning": bool(trace.get("reasoning", {}).get("used", False)),
             "config_fingerprint": self.cfg.fingerprint(),
             "offline": self.cfg.is_offline,
         })
@@ -282,7 +438,7 @@ class LocalRAG:
         return Answer(
             query=query, text=text, citations=hits,
             latency_ms=latency, audit_hash=audit_hash,
-            config_fingerprint=self.cfg.fingerprint(),
+            config_fingerprint=self.cfg.fingerprint(), trace=trace,
         )
 
     # ---------------- 运维 ----------------

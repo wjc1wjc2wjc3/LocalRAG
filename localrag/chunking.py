@@ -188,3 +188,42 @@ def chunk_document(text: str, size: int = 800, overlap: int = 120,
         for (t, s, e) in chunk_text(text, size, overlap, start_at=start, end_at=end):
             out.append((t, s, e, path))
     return out
+
+
+def build_section_tree(sections):
+    """由章节区间构造**层级树**（doc → H1 → H2 → …）。
+
+    输入 `sections` 为 `split_markdown_sections` 的结果：
+    `[(path, start, end), ...]`，其中 `path` 形如 ``"总纲 > 报销细则"``。
+
+    返回根节点列表，每个节点是 dict：
+    `{"title","level","path","start","end","children":[...],"parent":path|None}`。
+    相同 path 的多个区间会被合并（取最大 end），从而形成真正的层级、
+    而非扁平列表——这正是「无分块 / 结构保留」检索的基础。
+
+    纯标准库、零依赖、离线可用。
+    """
+    roots: list = []
+    nodes: dict = {}
+    for path, start, end in sections:
+        if not path or not path.strip():
+            continue  # 首个标题前的正文片段（path 为空）不计入树
+        parts = [p.strip() for p in path.split(">")]
+        parent = None
+        cur = ""
+        for level, title in enumerate(parts, 1):
+            cur = (cur + " > " + title) if cur else title
+            node = nodes.get(cur)
+            if node is None:
+                node = {"title": title, "level": level, "path": cur,
+                        "start": start, "end": end, "children": [],
+                        "parent": parent["path"] if parent else None}
+                nodes[cur] = node
+                if parent is None:
+                    roots.append(node)
+                else:
+                    parent["children"].append(node)
+            else:
+                node["end"] = max(node["end"], end)
+            parent = node
+    return roots

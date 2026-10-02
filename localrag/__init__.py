@@ -8,9 +8,10 @@ from .config import Config
 from .eval import evaluate
 from .generator import ExtractiveGenerator, OpenAICompatGenerator
 from .rag import Answer, Citation, LocalRAG
+from .reason import TreeReasoner
 from .store import KnowledgeStore
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "LocalRAG",
@@ -21,6 +22,7 @@ __all__ = [
     "Answer",
     "ExtractiveGenerator",
     "OpenAICompatGenerator",
+    "TreeReasoner",
     "BM25",
     "rrf_fuse",
     "evaluate",

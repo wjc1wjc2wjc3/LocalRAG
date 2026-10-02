@@ -65,6 +65,14 @@
 | 14 | **章节感知切分 + HTML 解析** | 一律按固定字符窗口硬切，标题结构全丢；HTML 还要引第三方解析库 | Markdown 按标题层级切分并保留章节路径（引用可定位到章节）；HTML 用标准库 `HTMLParser` 解析，零依赖 |
 | 15 | **检索效果可量化评测** | 全靠手感调参，改了切分策略不知道变好还是变差 | 内置 `recall@k` 与 `MRR` 评测（`--json` 可进 CI），评测集为纯 JSON |
 | 16 | **运维可观测** | 只给一个「文档数」，不知道谁在问什么 | `docs` 列出已索引文档（含 acl/tags）；`audit-stats` 输出查询量、热点文档 Top10、权限分布、平均延迟；答案可导出带引用的 Markdown |
+| 17 | **结构感知检索（章节树）** | 多按固定窗口硬切，长文档被切碎、跨章节语义丢失 | 受 PageIndex 启发：为 Markdown 文档构建 `doc→H1→H2` 层级树，检索按章节聚合得分、优先返回高相关章节，保留文档自然结构（**零依赖、离线**） |
+| 18 | **上下文感知检索** | 每次查询只看当前一句，多轮对话里指代/省略导致检索偏题 | `history` / `domain_terms` 并入查询向量与词法查询，近期对话与领域词共同决定召回（离线、无需模型） |
+| 19 | **推理式章节导航（可选 LLM）** | 纯相似度匹配，不会「像人翻书一样」定位章节 | 受 PageIndex 启发、做成**可选外挂**：开启且本地模型可达时，用 LLM 在候选章节上推理挑选相关子树；无模型/出错自动回退离线管线，系统始终可用 |
+| 20 | **可溯源检索路径（trace）** | 只给结果，无法解释「为什么是这样」 | 每个答案附带 `trace`：有效查询、是否上下文扩展、命中章节与得分、是否启用推理导航；配合既有哈希链审计，做到「结果 + 路径 + 审计」三重可解释 |
+
+> **设计取舍（关于 PageIndex）**：PageIndex 是「LLM 中心、无向量」的标杆——用 LLM 建树、推理式检索。
+> LocalRAG 的底线是**零依赖、离线优先、默认不需要任何 LLM**。因此我们只借其**结构层、溯源 UX、上下文感知**思想，
+> 把「LLM 推理导航」做成**可选外挂**：没有本地模型时，向量 + BM25 + 结构感知的离线管线完整可用；有本地模型时再叠加推理式精排。
 
 ---
 
@@ -74,7 +82,20 @@
 # 核心零依赖，无需安装任何包（可选依赖见 requirements.txt）
 py -m localrag.cli index ./docs --acl team --tags 财务
 py -m localrag.cli query "报销需要提交什么材料？" --acl team
-py -m localrag.cli query "报销流程" --tags 财务 --md --out answer.md   # 导出带引用的 Markdown
+py -m localrag.cli query "报销流程" --tags 财务 --md --out answer.md   # 导出带引用与检索路径的 Markdown
+
+# 受 PageIndex 启发的新能力（均离线、零依赖） -------------------------------
+# 1) 结构感知检索（默认开启）：按章节树聚合得分，长文档优先返回高相关章节
+py -m localrag.cli query "年假怎么请" --acl team            # 默认 structure_aware
+py -m localrag.cli query "年假怎么请" --disable-structure  # 关闭，退回纯 chunk 召回
+
+# 2) 上下文感知检索：多轮对话 / 领域词并入查询，解决指代与省略
+py -m localrag.cli query "审批超时怎么办" --history chat.json   # chat.json: [{"role":"user","content":"年假怎么请"}]
+py -m localrag.cli query "发票缺失" --domain-terms E1002
+
+# 3) 推理式章节导航（可选外挂）：需本地 OpenAI 兼容模型（如 CPUEdgeInference）
+py -m localrag.cli query "报销需要什么" --reasoning --reasoning-endpoint http://127.0.0.1:8080/v1
+
 py -m localrag.cli docs                       # 列出已索引文档（含 acl / tags）
 py -m localrag.cli stats
 py -m localrag.cli audit-verify               # 校验审计链
@@ -231,6 +252,10 @@ LocalRAG/
 - [x] 混合检索（向量 + BM25，RRF 融合）+ MMR 去重
 - [x] 业务标签（tags）过滤与 Markdown 章节感知切分
 - [x] 检索评测（recall@k / MRR）
+- [x] **结构感知检索（章节树）**——受 PageIndex 启发，保留文档自然层级
+- [x] **上下文感知检索**（`history` / `domain_terms` 并入查询）
+- [x] **可溯源检索路径（trace）**——答案附带命中章节与推理过程
+- [x] **推理式章节导航（可选 LLM 外挂）**——有本地模型时叠加，无模型自动回退
 - [ ] 语义重排（cross-encoder，需本地模型）
 - [ ] 多模态：图片 / 表格抽取（仍保持离线）
 - [ ] 审计日志可视化（按文档 / 用户维度）

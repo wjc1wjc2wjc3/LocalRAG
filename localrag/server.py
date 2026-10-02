@@ -36,6 +36,9 @@ def create_app(cfg: Config | None = None):
         query: str
         acl: str = "public"
         top_k: Optional[int] = None
+        history: list = []
+        domain_terms: list = []
+        reasoning: Optional[bool] = None
 
     @app.post("/index")
     def index(req: IndexReq):
@@ -44,7 +47,10 @@ def create_app(cfg: Config | None = None):
     @app.post("/query")
     def query(req: QueryReq):
         acls = [a.strip() for a in req.acl.split(",") if a.strip()]
-        ans = rag.ask(req.query, acls=acls, top_k=req.top_k)
+        ans = rag.ask(req.query, acls=acls, top_k=req.top_k,
+                      history=req.history or None,
+                      domain_terms=req.domain_terms or None,
+                      reasoning=req.reasoning)
         return ans.to_dict()
 
     @app.get("/stats")

@@ -45,6 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="MMR 去重强度，0=关闭（默认 0.3）")
     p.add_argument("--allow-network", action="store_true",
                    help="显式允许联网（默认全离线；仅首次拉取本地模型时需要）")
+    p.add_argument("--disable-structure", action="store_true",
+                   help="关闭结构感知检索（默认开启，按章节树聚合得分）")
+    p.add_argument("--reasoning", action="store_true",
+                   help="开启 LLM 推理式章节导航（需本地 OpenAI 兼容模型，可选外挂）")
+    p.add_argument("--reasoning-endpoint", default=None,
+                   help="推理导航端点（默认 http://127.0.0.1:8080/v1）")
+    p.add_argument("--history-turns", type=int, default=None,
+                   help="上下文感知：并入查询的历史轮数（默认 2）")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -58,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
     pq.add_argument("--acl", default="public")
     pq.add_argument("--tags", default="", help="只检索带这些标签的文档")
     pq.add_argument("--top-k", type=int, default=None)
+    pq.add_argument("--history", default="",
+                    help="历史对话 JSON 文件路径（列表，每项为 {role,content} 或 [问,答]）")
+    pq.add_argument("--domain-terms", default="", help="额外领域词，逗号分隔，并入查询")
+    pq.add_argument("--reasoning", action="store_true",
+                    help="本次查询启用 LLM 推理式章节导航")
     pq.add_argument("--json", action="store_true", help="以 JSON 输出")
     pq.add_argument("--md", action="store_true", help="以 Markdown 输出（含引用清单）")
     pq.add_argument("--out", default="", help="把结果写入文件")
@@ -91,7 +104,13 @@ def main(argv=None) -> int:
         hybrid=(args.retrieval == "hybrid"), hybrid_mode=args.hybrid_mode,
         mmr_lambda=args.mmr_lambda,
         allow_network=args.allow_network,
+        structure_aware=not args.disable_structure,
+        reasoning_rerank=args.reasoning,
     )
+    if args.reasoning_endpoint:
+        cfg.reasoning_endpoint = args.reasoning_endpoint
+    if args.history_turns is not None:
+        cfg.history_turns = args.history_turns
     rag = LocalRAG(cfg)
 
     try:
@@ -104,8 +123,15 @@ def main(argv=None) -> int:
             print(f"\n共写入 {total} 个 chunk（skipped 表示内容未变，已跳过）")
 
         elif args.cmd == "query":
+            history = None
+            if args.history:
+                with open(args.history, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            domain_terms = _split_list(args.domain_terms) if args.domain_terms else None
+            reasoning = args.reasoning if args.reasoning else None
             ans = rag.ask(args.query, acls=_split_list(args.acl),
-                          top_k=args.top_k, tags=_split_list(args.tags))
+                          top_k=args.top_k, tags=_split_list(args.tags),
+                          history=history, domain_terms=domain_terms, reasoning=reasoning)
             if args.json:
                 out = json.dumps(ans.to_dict(), ensure_ascii=False, indent=2)
             elif args.md:
@@ -114,8 +140,13 @@ def main(argv=None) -> int:
                 refs = "\n".join(
                     f"  [{i}] {c.location()}  score={c.score:.4f}  acl={c.acl}"
                     for i, c in enumerate(ans.citations, 1))
+                tr = ans.trace
+                secs = ""
+                if tr.get("top_sections"):
+                    secs = "；".join(s["path"] for s in tr["top_sections"][:3])
+                    secs = f"\n命中章节：{secs}"
                 out = (f"{ans.text}\n\n引用：\n{refs}\n"
-                       f"\n审计记录 {ans.audit_hash[:16]}…  耗时 {ans.latency_ms:.1f}ms")
+                       f"{secs}\n\n审计记录 {ans.audit_hash[:16]}…  耗时 {ans.latency_ms:.1f}ms")
             if args.out:
                 with open(args.out, "w", encoding="utf-8") as f:
                     f.write(out)
